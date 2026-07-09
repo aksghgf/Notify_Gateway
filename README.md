@@ -6,7 +6,7 @@ A rate-limited, LLM-classified real-time notification gateway. Built with FastAP
 
 ## Architecture
 
-![NotifyGate architecture](./architecture.svg)
+![NotifyGate architecture](./docs/architecture.svg)
 
 ### How cross-instance delivery works
 
