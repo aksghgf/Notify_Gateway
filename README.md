@@ -36,6 +36,19 @@ The nice part: `PUBLISH` tells you how many subscribers actually got the message
 
 So Redis Pub/Sub is doing the cross-instance bridging, and the Redis List is the safety net for offline users. I didn't need to change anything about this design to make it work behind a load balancer with multiple instances — it was built that way from the start.
 
+### How the rate limiter actually works
+
+This is a token bucket, implemented as a Redis Lua script (`app/token_bucket.lua`) so the whole check-and-decrement happens as one atomic operation on Redis's side.
+
+Here's the logic:
+
+1. Each `user_id` gets a Redis hash storing two things: how many tokens it currently has, and when it was last refilled.
+2. On every request, the script first figures out how much time has passed since the last refill, and calculates how many new tokens should've accumulated since then (1 every 2 seconds), capped at the max of 5.
+3. If there's at least 1 token available after that, it deducts one and allows the request. If not, it rejects it.
+4. It writes the updated token count and refill timestamp back, and sets a 60-second expiry on the key so idle users don't leave stale data sitting in Redis forever.
+
+The reason I did this as a Lua script instead of separate GET/SET calls from Python is concurrency. If I read the token count, calculated the new value in Python, and then wrote it back — two requests arriving at the same time could both read "3 tokens left," both think they're allowed, and both write back 2, when really only one of them should've gone through. Redis runs Lua scripts as a single atomic step, so there's no window where two requests can interleave like that. That's what makes the "exactly 5 out of 20" test actually hold up under real concurrency instead of just usually working.
+
 ---
 
 ## Setup
