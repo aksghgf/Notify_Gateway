@@ -4,136 +4,107 @@ A rate-limited, LLM-classified real-time notification gateway. Built with FastAP
 
 ---
 
-## Architecture Overview
-
-NotifyGate accepts incoming events over HTTP, applies a per-user token-bucket rate limit, classifies each event using an LLM into `urgent` / `normal` / `promotional`, and delivers the classified event to the target user in real time over a WebSocket connection. If the user isn't currently connected, the event is stored durably and can be retrieved later.
+## Architecture
 
 ```
 POST /events
-     |
-     v
-Rate Limiter (Redis Lua script, atomic token bucket)
-     |  (429 if rejected)
-     v
-LLM Classifier (Groq, structured JSON output, 3s timeout + fallback)
-     |
-     v
+     │
+     ▼
+Rate Limiter ── Redis Lua script, atomic token bucket (429 if rejected)
+     │
+     ▼
+Classifier ──── Groq LLM, structured JSON output, 3s timeout + fallback
+     │
+     ▼
 Redis PUBLISH on channel "channel:{user_id}"
-     |
-     +--> Any instance subscribed to that channel forwards to its
-     |    local WebSocket connection for that user (if connected)
-     |
-     +--> If no subscriber received it, event is also written to
-          Redis List "pending:{user_id}" (24h TTL) as a durable fallback
+     │
+     ├──► Connected instance forwards to local WebSocket ─► delivered live
+     │
+     └──► No subscriber found ─► written to Redis List "pending:{user_id}"
+                                   (24h TTL, retrievable via GET /notifications/:user_id/pending)
 ```
 
-### Cross-instance delivery design
+### Cross-instance delivery
 
-This is the core design constraint from the assignment: the service must work correctly behind a load balancer with 2+ instances, where a user connected to Instance A must receive an event ingested via Instance B.
+The assignment's core constraint: a user connected to Instance A must receive an event ingested via Instance B.
 
-**How it works in this codebase:**
+- Each instance keeps a **local, in-memory** `user_id → WebSocket` map (`connection_manager.py`). Valid only within that process — never treated as the sole source of truth.
+- On connect, each instance subscribes to a Redis Pub/Sub channel (`channel:{user_id}`) via a background task.
+- On ingest, **any** instance publishes to that same channel, regardless of which instance received the HTTP request.
+- Redis fans the message out to every subscribed instance; whichever one holds the live socket forwards it.
+- `PUBLISH` returns the subscriber count. If `0`, the event is also written to a durable Redis List so it isn't lost.
 
-- Each FastAPI instance keeps a local, in-memory `ConnectionManager` (`app/connection_manager.py`) mapping `user_id -> WebSocket`. This map is only ever valid within that one process.
-- When a client connects over `/ws` and identifies itself with a `user_id`, the instance starts a background task (`subscribe_user`) that subscribes to a Redis Pub/Sub channel named `channel:{user_id}`.
-- When any instance ingests and classifies an event for that `user_id`, it calls `publish_event()`, which does a Redis `PUBLISH` on that same channel — regardless of which instance originally received the HTTP request.
-- Redis Pub/Sub fans that message out to **every instance** currently subscribed to that channel. Whichever instance actually holds the live WebSocket connection for that user forwards the message to its local socket.
-- `PUBLISH` returns the number of subscribers that received the message. If it's `0` (no instance has that user connected anywhere), the event is additionally written to a Redis List (`pending:{user_id}`) so it isn't lost. This list is retrievable via `GET /notifications/{user_id}/pending`, and is cleared once read.
-
-This means the in-process dictionary is never the sole source of truth for delivery — Redis Pub/Sub is the cross-instance bridge, and the Redis List is the durability backstop for offline users. Running 2+ instances behind a load balancer requires no code change to this design.
+Redis Pub/Sub is the cross-instance bridge; the Redis List is the durability backstop. No code change is needed to run this behind a load balancer with 2+ instances.
 
 ---
 
-## Setup & Running Locally
+## Setup
 
-### Prerequisites
-- Python 3.10+
-- A free Redis instance ([Upstash](https://upstash.com) recommended — 256MB free tier, no card required)
-- A free [Groq API key](https://console.groq.com)
+**Prerequisites:** Python 3.10+, a free [Upstash Redis](https://upstash.com) instance, a free [Groq API key](https://console.groq.com)
 
-### Steps
+```bash
+git clone <your-repo-url>
+cd notifygate
+pip install -r requirements.txt
+```
 
-1. **Clone the repo**
-   ```bash
-   git clone <your-repo-url>
-   cd notifygate
-   ```
+Copy `.env.example` → `.env` and fill in:
+```
+REDIS_URL=rediss://default:<password>@<your-endpoint>.upstash.io:6379
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxx
+```
 
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+Run it:
+```bash
+python -m uvicorn app.main:app --reload
+```
 
-3. **Configure environment variables**
-
-   Copy `.env.example` to `.env` and fill in your own values:
-   ```
-   REDIS_URL=rediss://default:<password>@<your-endpoint>.upstash.io:6379
-   GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxx
-   ```
-
-4. **Run the server**
-   ```bash
-   python -m uvicorn app.main:app --reload
-   ```
-   Server starts at `http://127.0.0.1:8000`.
-
-5. **Run tests**
-   ```bash
-   python -m pytest tests/ -v
-   ```
-   This includes the required concurrency test for Part 1 (fires 20 simultaneous requests for the same `user_id` and asserts exactly 5 succeed).
+Test it:
+```bash
+python -m pytest tests/ -v
+```
+Includes the required concurrency test — 20 simultaneous requests, asserts exactly 5 succeed.
 
 ---
 
-## Testing the API
+## Trying It Out
 
-### Interactive docs (REST endpoints)
+**REST endpoints:** visit `http://127.0.0.1:8000/docs` (Swagger UI) — click "Try it out" on `/events`, `/health`, or `/notifications/{user_id}/pending`, no curl needed.
 
-Once the server is running, visit **`http://127.0.0.1:8000/docs`** for FastAPI's auto-generated Swagger UI. You can expand `POST /events`, `GET /health`, and `GET /notifications/{user_id}/pending`, click "Try it out," and fire real requests directly from the browser — no curl/Postman needed.
-
-### WebSocket delivery (manual)
-
-Swagger UI doesn't support WebSocket testing, so a small client script is included:
+**WebSocket delivery:** Swagger can't test WebSockets, so:
 ```bash
 python tests/test_ws_client.py
 ```
-This connects, identifies as a test `user_id`, and prints any event pushed to it in real time. To see it in action, run this in one terminal, then `POST /events` with a matching `user_id` in another (via Swagger UI or curl).
-
-### Example request (curl)
-```bash
-curl -X POST http://127.0.0.1:8000/events \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "abhishek123", "source": "monitoring", "message": "Server CPU usage at 98%"}'
-```
+Run this in one terminal, then `POST /events` with a matching `user_id` from another — watch it arrive live.
 
 ---
 
 ## Written Section
 
-### Redis outage: what breaks, and the minimal fix
+### Redis outage (90s, mid-ingestion)
 
-If Redis goes down for 90 seconds while events are actively being ingested, two things break immediately: the rate limiter (`is_allowed()`) can no longer read/write token bucket state, and the Pub/Sub publish + pending-store write both fail. In the current implementation, both of these are `await`ed directly with no error handling around the Redis calls, so a Redis outage would raise an unhandled exception inside the `/events` handler, and FastAPI would return a `500 Internal Server Error` for every request during the outage. No events would be classified or delivered during that window, and the failure would be silent from the client's perspective beyond the 500 — there's no distinction between "rejected" and "system down."
+Both the rate limiter and the publish/pending-store write hit Redis directly with no error handling — an outage would surface as an unhandled exception, and every request would 500 during that window. No distinction between "rejected" and "system down."
 
-The minimal change to degrade gracefully instead of hard-failing is to wrap the rate-limiter and Redis calls in a try/except, and decide a fail-open vs fail-closed policy explicitly. I'd fail-closed for the rate limiter specifically (return `503 Service Unavailable` rather than silently allowing unlimited traffic through, since the whole point of the limiter is protection) and log a `redis_unavailable` event distinctly from a `rate_limit_rejected` event so on-call engineers can tell the two apart in the logs. A more resilient version would add a short-lived local in-memory fallback limiter that activates only while Redis is unreachable, but that adds complexity (and a new source of the exact cross-instance inconsistency the assignment is designed to avoid) — for this scope, fail-closed with clear logging is the more defensible tradeoff.
+**Minimal fix:** wrap the Redis calls in try/except and fail closed — return `503` rather than silently letting unlimited traffic through, since the limiter's whole job is protection. Log `redis_unavailable` distinctly from `rate_limit_rejected` so on-call can tell the two apart. A local in-memory fallback limiter would be more resilient, but adds complexity and reintroduces the cross-instance inconsistency the assignment is designed to avoid — fail-closed with clear logging is the more defensible tradeoff at this scope.
 
-### LLM outage: what happens end-to-end
+### LLM outage (10 minutes straight)
 
-If the Groq API returns errors for 10 minutes straight, the flow is: a request comes in, passes the rate limiter (Redis is unaffected by an LLM outage), and reaches `classify_event()`. The `asyncio.wait_for(..., timeout=3.0)` wrapper means each call fails fast rather than hanging — either the Groq call itself errors out (caught by the generic `except Exception` block) or it exceeds 3 seconds and is cancelled (caught by `except asyncio.TimeoutError`). Either way, the function logs the failure (`classification_failed` or `classification_timeout`, with the raw error included for the former) and returns the fallback classification `"normal"`.
+Each call is wrapped in `asyncio.wait_for(timeout=3.0)`, so failures surface fast rather than hanging — either Groq errors out directly, or the call is cancelled at 3s. Either way it's logged (`classification_failed` / `classification_timeout`, with the raw error) and falls back to `"normal"`.
 
-Critically, the event is **not dropped** — it continues through the rest of the pipeline exactly as if it had been classified normally: it's published over Redis Pub/Sub, delivered in real time if the user is connected, or written to the pending store if not. The only user-visible effect during the 10-minute outage is that every event gets misclassified as `"normal"` regardless of its true urgency — an `urgent` alert would be delivered with the same priority as routine noise. This is a real degradation (a genuinely urgent notification could get lost in the noise), but it's a deliberate tradeoff: availability and delivery are preserved at the cost of prioritization accuracy, which I think is the right call for a notification system, since a delayed classification is recoverable but a dropped notification is not.
+**The event is never dropped** — it still gets published, delivered live if connected, or queued in the pending store if not. The only effect during the outage is misclassification: a genuinely `urgent` alert gets the same priority as routine noise. That's a real degradation, but a deliberate tradeoff — availability and delivery are preserved at the cost of prioritization accuracy. A delayed classification is recoverable; a dropped notification isn't.
 
-### One ambiguity I resolved
+### One ambiguity resolved: missing `user_id` on WebSocket connect
 
-The spec doesn't say what should happen if `user_id` is missing or empty when a client connects to the WebSocket endpoint (as opposed to the `POST /events` body, where Pydantic validation handles it automatically by rejecting the request with a `422`). For the WebSocket, there's no built-in validation step — the first message is read manually with `receive_json()`, so an empty or missing `user_id` would otherwise be silently accepted and used as a dictionary key, effectively creating a broken "anonymous" channel that could never receive anything meaningful, and would silently overwrite any other connection that also failed to send a `user_id`.
+`POST /events` gets free validation via Pydantic (missing `user_id` → automatic `422`). The WebSocket endpoint has no such guardrail — the first message is read manually, so an empty/missing `user_id` would silently become a dictionary key, creating a dead "anonymous" channel and potentially overwriting another broken connection.
 
-I resolved this by explicitly checking for `user_id` right after the handshake and closing the connection immediately with a custom close code (`4001`, in the app-specific 4000–4999 range) and a descriptive reason if it's missing. This mirrors what Pydantic does automatically for the REST endpoint, keeps both entry points consistent in how they reject malformed identification, and avoids the silent-overwrite bug entirely.
+**Resolution:** explicitly check for `user_id` right after the handshake and close with a custom code (`4001`) and reason if missing — mirroring what Pydantic does for the REST side, and avoiding the silent-overwrite bug.
 
 ---
 
-## What I'd Do Differently With More Time
+## With More Time
 
-- **Rate limiter resilience:** as described above, add explicit try/except around Redis calls with a fail-closed `503` response instead of letting connection errors surface as unhandled `500`s.
-- **Acknowledged delivery for pending notifications:** currently `GET /notifications/{user_id}/pending` clears the list immediately on read, which means a client that crashes after receiving the response but before processing it loses those notifications permanently. A proper ack/nack flow (or at least a short grace period before deletion) would be more robust.
-- **Local fallback rate limiting** during Redis outages, as a middle ground between fail-open and fail-closed.
-- **Load testing the WebSocket layer** with many concurrent connections to validate the Pub/Sub fan-out design actually holds up under real cross-instance load, rather than the manual two-terminal verification I relied on here.
-- **Structured request tracing** (a request ID threaded through rate-limit → classify → deliver logs) to make debugging a single event's journey through the pipeline easier — I ran into exactly this kind of confusion once during development when a stale reloaded server process caused misleading test results, and a request ID would have made that immediately obvious from the logs.
+- **Rate limiter resilience** — try/except around Redis calls, fail-closed `503` instead of unhandled `500`s
+- **Acknowledged delivery** — `GET /notifications/:user_id/pending` clears on read; a client that crashes before processing loses that data. A proper ack/nack flow (or grace period) would be safer
+- **Local fallback rate limiting** during Redis outages, as a middle ground between fail-open and fail-closed
+- **Load testing** the WebSocket/Pub-Sub fan-out under real concurrent connections, beyond the manual two-terminal verification done here
+- **Request tracing** — a request ID threaded through rate-limit → classify → deliver logs. I hit exactly this gap once mid-build, when a stale reloaded server process produced misleading test results; a request ID would've made that obvious immediately
