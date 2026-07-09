@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+redis
+pydantic
+structlog
+groq
+websockets
+pytest
+pytest-asyncio
+httpx
