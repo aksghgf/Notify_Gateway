@@ -6,23 +6,7 @@ A rate-limited, LLM-classified real-time notification gateway. Built with FastAP
 
 ## Architecture
 
-```
-POST /events
-     │
-     ▼
-Rate Limiter ── Redis Lua script, atomic token bucket (429 if rejected)
-     │
-     ▼
-Classifier ──── Groq LLM, structured JSON output, 3s timeout + fallback
-     │
-     ▼
-Redis PUBLISH on channel "channel:{user_id}"
-     │
-     ├──► Connected instance forwards to local WebSocket ─► delivered live
-     │
-     └──► No subscriber found ─► written to Redis List "pending:{user_id}"
-                                   (24h TTL, retrievable via GET /notifications/:user_id/pending)
-```
+![NotifyGate architecture](./architecture.svg)
 
 ### How cross-instance delivery works
 

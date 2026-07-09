@@ -1,0 +1,75 @@
+<svg width="680" height="700" viewBox="0 0 680 700" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>NotifyGate architecture flow</title>
+<desc>An event flows from client through rate limiting, classification, and Redis pub/sub, then branches to either live WebSocket delivery or a durable pending store for offline users.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<rect width="680" height="700" fill="#FFFFFF"/>
+
+<line x1="340" y1="84" x2="340" y2="124" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="340" y1="180" x2="340" y2="220" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="340" y1="276" x2="340" y2="316" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="340" y1="372" x2="225" y2="412" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="340" y1="372" x2="455" y2="412" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="225" y1="468" x2="225" y2="508" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="455" y1="468" x2="455" y2="508" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M455 564 L455 584 L340 584 L340 604" fill="none" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+
+<g>
+<rect x="250" y="40" width="180" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="62" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#444441">Client sends event</text>
+</g>
+
+<g>
+<rect x="190" y="124" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="142" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#444441">Rate limiter</text>
+<text x="340" y="160" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Redis Lua script, token bucket</text>
+</g>
+
+<g>
+<rect x="190" y="220" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="238" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#444441">Classifier</text>
+<text x="340" y="256" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Groq LLM, 3s timeout + fallback</text>
+</g>
+
+<g>
+<rect x="190" y="316" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="334" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#444441">Redis pub/sub</text>
+<text x="340" y="352" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Publishes on channel: user_id</text>
+</g>
+
+<g>
+<rect x="130" y="412" width="190" height="56" rx="8" fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.5"/>
+<text x="225" y="430" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#27500A">Instance A</text>
+<text x="225" y="448" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#3B6D11">Has the connection</text>
+</g>
+
+<g>
+<rect x="360" y="412" width="190" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="455" y="430" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#633806">Instance B</text>
+<text x="455" y="448" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">No subscriber found</text>
+</g>
+
+<g>
+<rect x="130" y="508" width="190" height="56" rx="8" fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.5"/>
+<text x="225" y="526" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#27500A">Delivered live</text>
+<text x="225" y="544" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#3B6D11">Pushed via WebSocket</text>
+</g>
+
+<g>
+<rect x="360" y="508" width="190" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="455" y="526" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#633806">Pending store</text>
+<text x="455" y="544" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">Redis list, 24h TTL</text>
+</g>
+
+<g>
+<rect x="190" y="604" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="622" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#444441">Retrieve pending</text>
+<text x="340" y="640" text-anchor="middle" dominant-baseline="central" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">GET /notifications/:id/pending</text>
+</g>
+
+<text x="340" y="690" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#888780">green = delivered live &#183; amber = stored for later (offline)</text>
+</svg>
