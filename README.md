@@ -78,25 +78,34 @@ Run that in one terminal to connect as a test user, then `POST /events` with the
 
 ## Written Section
 
-### If Redis goes down for 90 seconds mid-ingestion
+Here is a concise, structured breakdown of your engineering choices and their trade-offs. It keeps things sharp and punchy for easy scanning.
 
-Honestly, right now this would break pretty badly. Both the rate limiter and the publish/pending-store logic talk to Redis directly with no error handling around those calls, so if Redis is unreachable, that call just throws, and the whole `/events` request blows up into a `500`. Every request during the outage would fail the same way, and from the outside there's no way to tell "you got rate limited" apart from "the system is actually down" — they'd both just look broken.
+## Redis Outage (90s)
+Current State: Naked Redis calls throw unhandled exceptions, turning rate-limit or storage failures into generic 500 Internal Server Error responses.
 
-The smallest fix I'd make is wrapping the Redis calls in try/except and deciding explicitly what happens when Redis isn't there. I'd lean toward failing closed for the rate limiter specifically — return a `503` instead of quietly letting everything through — since the entire point of that limiter is protection, and I'd rather be conservative than let a Redis blip turn into an accidental DDoS on my own downstream services. I'd also log that as its own thing (`redis_unavailable`) so it's not confused with a normal rate-limit rejection in the logs. A more robust version could fall back to some short-lived local counter while Redis is down, but that brings back the exact cross-instance inconsistency problem this whole design is trying to avoid, so for now I think fail-closed with clear logging is the more honest tradeoff.
+The Fix: Wrap Redis calls in try/except blocks and catch connectivity issues explicitly.
 
-### If the LLM provider errors out for 10 minutes straight
+The Trade-off (Fail Closed): If Redis is down, return a clear 503 Service Unavailable and log it as redis_unavailable.
 
-Walking through this one step by step: a request comes in, passes the rate limiter fine (that part doesn't touch the LLM at all), and then hits `classify_event()`. Because that call is wrapped in `asyncio.wait_for(timeout=3.0)`, it doesn't just hang — either Groq comes back with an error right away, or it gets cut off at 3 seconds. Both paths get logged (`classification_failed` or `classification_timeout`, with whatever error came back) and both fall back to returning `"normal"`.
+Why: It protects downstream services from an accidental DDoS. Avoiding local in-memory fallbacks prevents data inconsistency across instances.
 
-The thing I want to be clear about: the event itself doesn't get dropped. It still goes through the rest of the pipeline exactly like normal — gets published, gets delivered live if the user's connected, or lands in the pending store if not. The only actual damage during the outage is that everything gets classified as `"normal"`, so something that's genuinely urgent would show up with the same priority as routine noise. That's a real problem, but I made that tradeoff on purpose — I'd rather deliver everything with the wrong priority than start silently dropping messages, because you can recover from a misclassification but you can't recover from a notification that never arrived.
+## LLM Provider Outage (10 min)
+Current State: The system relies on asyncio.wait_for(timeout=3.0) around classify_event().
 
-### One thing I had to just decide on: missing user_id over WebSocket
+The Behavior: If Groq fails or times out, the system logs classification_failed or classification_timeout and defaults the event priority to "normal".
 
-For `POST /events`, if `user_id` is missing, Pydantic just handles it automatically and returns a `422` — I didn't have to think about it. But the WebSocket endpoint doesn't have that kind of validation built in; I'm reading the first message manually with `receive_json()`. So if someone connects and sends an empty or missing `user_id`, nothing would stop that from happening — it'd just get used as a dictionary key, effectively creating a connection that can never receive anything meaningful, and if a second broken client did the same thing, it'd silently overwrite the first one.
+The Trade-off (Fail Open): Events are never dropped; they flow through the entire live/pending pipeline with degraded priority classification.
 
-I decided to just check for `user_id` right after accepting the connection, and if it's missing, close the socket immediately with a custom close code (4001) and a reason string. Felt like the right call mainly for consistency — it's basically doing manually what Pydantic already does for free on the REST side, and it avoids that silent-overwrite bug completely.
+Why: Delivering an urgent notification with a "normal" tag is a minor UX issue; silently dropping a critical message is a system failure.
 
----
+## Missing user_id over WebSockets
+Current State: Unlike the REST endpoint (where Pydantic enforces schema validation and throws a 422), the WebSocket connection reads raw JSON via receive_json(). Missing IDs would cause silent dictionary key overwrites in memory.
+
+The Fix: Manually validate the presence of user_id immediately after the connection handshake.
+
+The Behavior: Reject invalid clients immediately by closing the socket with a custom close code (4001) and a clear reason string.
+
+Why: Mirrors the API’s validation logic and cleanly prevents state corruption.
 
 ## What I'd do differently with more time
 
