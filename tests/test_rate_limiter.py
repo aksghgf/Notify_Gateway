@@ -7,10 +7,10 @@ from app.redis_client import redis_client
 async def test_exactly_5_requests_allowed_under_concurrency():
     user_id = "test_user_concurrent"
     
-    # Cleanup: purani state clear karo taaki test isolated ho
+    # Cleanup: clear older state for this user_id before test
     await redis_client.delete(f"rate_limit:{user_id}")
     
-    # 20 requests ek saath fire karo, sab ek hi user_id ke liye
+    # Fire 20 request for same user id
     tasks = [is_allowed(user_id) for _ in range(20)]
     results = await asyncio.gather(*tasks)
     
